@@ -50,7 +50,7 @@ ncat -C --ssl $server $port <$fifo | awk '
 		fflush("")
 	}
 
-	/^LOGI OK/ {
+	/^0000 OK/ {
 		print "0001", "select", "inbox"
 		print "1111", "search", "not", "answered"
 		fflush("")
