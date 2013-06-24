@@ -1,0 +1,110 @@
+#!/bin/sh
+# Fuck your bash.
+#
+# Connects to imap server, polls mail, pulls URL from the body,
+# prints it to stdout.
+#
+# Yes, you can do that in shell too.
+# Public domain. Fuck your license.
+#
+# Deps:
+#    ncat
+#    extract_url.pl from http://code.google.com/p/extracturl/
+#    libmime-tools-perl
+
+help=1
+[ "$1" = "-h" -o "$1" = "--help" -o "$1" = "-help" ] && shift || help=0
+
+user=${1:-}
+secs=${2:-30}
+server=${3:-imap.gmail.com}
+port=${4:-993}
+
+if [ $help -eq 1 -o "$user" = "" ]; then
+	echo "usage: echo PASS | ta USER [SECS [SERVER [PORT]]]"
+	echo "    USER   - imap user name"
+	echo "    PASS   - imap password"
+	echo "    SERVER - imap server hostname          [$server]"
+	echo "    PORT   - imap server port number       [$port]"
+	echo "    SECS   - mail check interval (seconds) [$secs]"
+	exit 1
+fi
+
+read password
+
+fifo=/tmp/taoskicka.fifo
+rm -f $fifo
+mkfifo $fifo || exit 1
+
+suicide() {
+	rm -f $fifo
+}
+
+trap suicide EXIT
+
+ncat -C --ssl $server $port <$fifo | awk '
+	BEGIN {
+		RS="\r\n"
+		ORS="\r\n"
+		print "0000", "login", "'$user'", "'$password'"
+		fflush("")
+	}
+
+	/^LOGI OK/ {
+		print "0001", "select", "inbox"
+		print "1111", "search", "not", "answered"
+		fflush("")
+	}
+
+	/^[*] SEARCH [0-9]/ {
+		for(i = 3; i < NF; i++)
+			uids[i-3] = $i
+		numuids = NF - 2
+		id = 0
+		fetchid = -1
+		print "2222", "fetch", uids[id], "(body.peek[header] body.peek[1])"
+		fflush("")
+	}
+
+	/^[*] SEARCH[ \t]*$/ {
+		# not found anything
+		system("sleep '$secs'")
+		print "1111", "search", "not", "answered"
+		fflush("")
+	}
+
+	/^[*] [0-9]+ FETCH/ {
+		fetchid = $2
+		body = ""
+	}
+
+	/^[ \t]*BODY\[1\][ \t]+[{][0-9]+[}][ \t]*/, /^2222 OK/ {
+		body = body "\n" $0
+	}
+
+	/^2222 OK/ && fetchid > 0 {
+		# extract just one URL
+		cmd = "./extract_url.pl -l | grep http | head -1 > /dev/stderr"
+		print body | cmd
+		close(cmd)
+
+		# mark as answered
+		print "3333", "store", fetchid, "+flags", "(\\Answered)"
+		fflush("")
+
+		id++
+		if(id < numuids){
+			print "2222", "fetch", uids[id++], "(body.peek[header] body.peek[1])"
+		} else {
+			system("sleep '$secs'")
+			print "1111", "search", "not", "answered"
+		}
+		fflush("")
+		fetchid = -1
+	}
+
+	END {
+		print "9999", "logout"
+		fflush("")
+	}
+' 2>/dev/stdout >$fifo
